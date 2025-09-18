@@ -247,8 +247,8 @@ func (scw *scalewayCloudProvider) Cleanup() error {
 func (scw *scalewayCloudProvider) Refresh() error {
 	klog.V(4).Info("Refresh,ClusterID=", scw.clusterID)
 
-	// FIX for first time call where lastRefresh is zero
-	if time.Since(scw.lastRefresh) < scw.refreshInterval {
+	// Only skip refresh if lastRefresh is non-zero and interval has not elapsed
+	if !scw.lastRefresh.IsZero() && time.Since(scw.lastRefresh) < scw.refreshInterval {
 		klog.V(4).Infof("Refresh,ClusterID=%s,skipping refresh, last refresh was %s ago", scw.clusterID, time.Since(scw.lastRefresh))
 		return nil
 	}
