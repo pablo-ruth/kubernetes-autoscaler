@@ -136,7 +136,7 @@ func (*scalewayCloudProvider) Name() string {
 func (scw *scalewayCloudProvider) NodeGroups() []cloudprovider.NodeGroup {
 	klog.V(4).Info("NodeGroups,ClusterID=", scw.clusterID)
 
-	var nodeGroups []cloudprovider.NodeGroup
+	nodeGroups := make([]cloudprovider.NodeGroup, 0, len(scw.nodeGroups))
 	for _, ng := range scw.nodeGroups {
 		nodeGroups = append(nodeGroups, ng)
 	}
