@@ -63,7 +63,7 @@ var (
 type Client interface {
 	ListPools(ctx context.Context, clusterID string) ([]PoolWithGenericNodeSpecs, error)
 	UpdatePool(ctx context.Context, poolID string, size int) (Pool, error)
-	ListNodes(ctx context.Context, cluserID string) ([]Node, error)
+	ListNodes(ctx context.Context, clusterID string) ([]Node, error)
 	DeleteNode(ctx context.Context, nodeID string) (Node, error)
 }
 
