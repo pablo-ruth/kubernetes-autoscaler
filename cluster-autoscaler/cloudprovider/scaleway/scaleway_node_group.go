@@ -200,7 +200,7 @@ func (ng *NodeGroup) TemplateNodeInfo() (*framework.NodeInfo, error) {
 	}
 
 	for allocatableName, allocatableValue := range ng.specs.Allocatable {
-		node.Status.Allocatable[apiv1.ResourceName(allocatableName)] = *resource.NewQuantity(int64(allocatableValue), resource.DecimalSI)
+		node.Status.Allocatable[apiv1.ResourceName(allocatableName)] = *resource.NewQuantity(allocatableValue, resource.DecimalSI)
 	}
 
 	node.Status.Conditions = cloudprovider.BuildReadyConditions()
