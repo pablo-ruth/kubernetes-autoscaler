@@ -105,13 +105,13 @@ func (ng *NodeGroup) DeleteNodes(nodes []*apiv1.Node) error {
 			continue
 		}
 
-		_, err := ng.DeleteNode(ctx, node.ID)
+		deletedNode, err := ng.DeleteNode(ctx, node.ID)
 		if err != nil {
 			return err
 		}
 
 		ng.pool.Size--
-		ng.nodes[n.Spec.ProviderID].Status = scalewaygo.NodeStatusDeleting
+		ng.nodes[n.Spec.ProviderID].Status = deletedNode.Status
 	}
 
 	return nil
