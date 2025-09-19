@@ -27,6 +27,7 @@ import (
 	"net/http"
 	"net/url"
 	"strconv"
+	"strings"
 	"time"
 
 	"k8s.io/autoscaler/cluster-autoscaler/version"
@@ -61,19 +62,20 @@ var (
 
 // Client is used to talk to Scaleway Kapsule API
 type Client interface {
-	ListPools(ctx context.Context, clusterID string) ([]PoolWithGenericNodeSpecs, error)
+	ListPools(ctx context.Context, clusterID string) (time.Duration, []PoolWithGenericNodeSpecs, error)
 	UpdatePool(ctx context.Context, poolID string, size int) (Pool, error)
-	ListNodes(ctx context.Context, clusterID string) ([]Node, error)
+	ListNodes(ctx context.Context, clusterID string) (time.Duration, []Node, error)
 	DeleteNode(ctx context.Context, nodeID string) (Node, error)
 }
 
 // Config is used to deserialize config file passed with flag `cloud-config`
 type Config struct {
-	ClusterID string `json:"cluster_id"`
-	SecretKey string `json:"secret_key"`
-	Region    string `json:"region"`
-	ApiUrl    string `json:"api_url"`
-	UserAgent string
+	ClusterID           string `json:"cluster_id"`
+	SecretKey           string `json:"secret_key"`
+	Region              string `json:"region"`
+	ApiUrl              string `json:"api_url"`
+	UserAgent           string
+	DefaultCacheControl time.Duration
 }
 
 // NewClient returns a new Client able to talk to Scaleway API
@@ -101,11 +103,12 @@ func NewClient(cfg Config) (*client, error) {
 	}
 
 	return &client{
-		httpClient: hc,
-		apiURL:     cfg.ApiUrl,
-		token:      cfg.SecretKey,
-		userAgent:  fmt.Sprintf("%s/%s cluster-id/%s", cfg.UserAgent, version.ClusterAutoscalerVersion, cfg.ClusterID),
-		region:     cfg.Region,
+		httpClient:          hc,
+		apiURL:              cfg.ApiUrl,
+		token:               cfg.SecretKey,
+		userAgent:           fmt.Sprintf("%s/%s cluster-id/%s", cfg.UserAgent, version.ClusterAutoscalerVersion, cfg.ClusterID),
+		region:              cfg.Region,
+		defaultCacheControl: cfg.DefaultCacheControl,
 	}, nil
 }
 
@@ -119,11 +122,12 @@ type scalewayRequest struct {
 
 // client contains necessary information to perform API calls
 type client struct {
-	httpClient *http.Client
-	apiURL     string
-	token      string
-	userAgent  string
-	region     string
+	httpClient          *http.Client
+	apiURL              string
+	token               string
+	userAgent           string
+	region              string
+	defaultCacheControl time.Duration
 }
 
 func (req *scalewayRequest) getURL(apiURL string) (*url.URL, error) {
@@ -149,21 +153,21 @@ func (c *client) Region() string {
 }
 
 // do perform a single HTTP request based on the generic Request object.
-func (c *client) do(ctx context.Context, req *scalewayRequest, res interface{}) error {
+func (c *client) do(ctx context.Context, req *scalewayRequest, res interface{}) (http.Header, error) {
 	if req == nil {
-		return errors.New("request must be non-nil")
+		return nil, errors.New("request must be non-nil")
 	}
 
 	// build URL
 	completeURL, err := req.getURL(c.apiURL)
 	if err != nil {
-		return err
+		return nil, err
 	}
 
 	// build request
 	httpRequest, err := http.NewRequest(req.Method, completeURL.String(), req.Body)
 	if err != nil {
-		return fmt.Errorf("could not create request: %w", err)
+		return nil, fmt.Errorf("could not create request: %w", err)
 	}
 
 	httpRequest.Header.Set("User-Agent", c.userAgent)
@@ -177,7 +181,7 @@ func (c *client) do(ctx context.Context, req *scalewayRequest, res interface{}) 
 	// execute request
 	httpResponse, err := c.httpClient.Do(httpRequest)
 	if err != nil {
-		return fmt.Errorf("error executing request: %w", err)
+		return nil, fmt.Errorf("error executing request: %w", err)
 	}
 
 	defer func() {
@@ -188,27 +192,26 @@ func (c *client) do(ctx context.Context, req *scalewayRequest, res interface{}) 
 
 	ct := httpResponse.Header.Get("Content-Type")
 	if ct != "application/json" {
-		return fmt.Errorf("unexpected content-type: %s with status: %s", ct, httpResponse.Status)
+		return nil, fmt.Errorf("unexpected content-type: %s with status: %s", ct, httpResponse.Status)
 	}
 
 	err = json.NewDecoder(httpResponse.Body).Decode(&res)
 	if err != nil {
-		return fmt.Errorf("could not parse %s response body: %w", ct, err)
+		return nil, fmt.Errorf("could not parse %s response body: %w", ct, err)
 	}
 
 	switch {
 	case httpResponse.StatusCode >= 200 && httpResponse.StatusCode < 300:
-		return nil
+		return httpResponse.Header, nil
 	case httpResponse.StatusCode >= 400 && httpResponse.StatusCode < 500:
 		err = ErrClientSide
 	case httpResponse.StatusCode >= 500 && httpResponse.StatusCode < 600:
 		err = ErrServerSide
 	default:
 		err = ErrOther
-
 	}
 
-	return fmt.Errorf("%d %v %v: %w", httpResponse.StatusCode, httpRequest.Method, httpRequest.URL, err)
+	return nil, fmt.Errorf("%d %v %v: %w", httpResponse.StatusCode, httpRequest.Method, httpRequest.URL, err)
 }
 
 // NodeStatus is the state in which a node might be
@@ -326,17 +329,19 @@ type ListPoolsResponse struct {
 }
 
 // ListPools returns pools associated to a cluster id
-func (c *client) ListPools(ctx context.Context, clusterID string) ([]PoolWithGenericNodeSpecs, error) {
+func (c *client) ListPools(ctx context.Context, clusterID string) (time.Duration, []PoolWithGenericNodeSpecs, error) {
 	klog.V(4).Info("ListPools,ClusterID=", clusterID)
 
 	var currentPage = 1
 	var pools []PoolWithGenericNodeSpecs
+	var cacheControl time.Duration
 	for {
-		paginatedPools, err := c.listPoolsPaginated(ctx, clusterID, currentPage, pageSizeListPools)
+		cc, paginatedPools, err := c.listPoolsPaginated(ctx, clusterID, currentPage, pageSizeListPools)
 		if err != nil {
-			return []PoolWithGenericNodeSpecs{}, err
+			return 0, []PoolWithGenericNodeSpecs{}, err
 		}
 		pools = append(pools, paginatedPools...)
+		cacheControl = cc
 
 		if len(paginatedPools) < pageSizeListPools || len(paginatedPools) == 0 {
 			break
@@ -345,12 +350,12 @@ func (c *client) ListPools(ctx context.Context, clusterID string) ([]PoolWithGen
 		currentPage++
 	}
 
-	return pools, nil
+	return cacheControl, pools, nil
 }
 
-func (c *client) listPoolsPaginated(ctx context.Context, clusterID string, page, pageSize int) ([]PoolWithGenericNodeSpecs, error) {
+func (c *client) listPoolsPaginated(ctx context.Context, clusterID string, page, pageSize int) (time.Duration, []PoolWithGenericNodeSpecs, error) {
 	if len(clusterID) == 0 {
-		return nil, errors.New("clusterID cannot be empty in request")
+		return 0, nil, errors.New("clusterID cannot be empty in request")
 	}
 
 	query := url.Values{}
@@ -364,9 +369,9 @@ func (c *client) listPoolsPaginated(ctx context.Context, clusterID string, page,
 	}
 
 	var resp ListPoolsResponse
-	err := c.do(ctx, scwReq, &resp)
+	header, err := c.do(ctx, scwReq, &resp)
 
-	return resp.Pools, err
+	return c.cacheControl(header), resp.Pools, err
 }
 
 // UpdatePoolRequest is passed to `UpdatePool` method
@@ -397,7 +402,7 @@ func (c *client) UpdatePool(ctx context.Context, poolID string, size int) (Pool,
 	scwReq.Body = bytes.NewReader(buf)
 
 	var resp Pool
-	err = c.do(ctx, scwReq, &resp)
+	_, err = c.do(ctx, scwReq, &resp)
 
 	return resp, err
 }
@@ -409,17 +414,19 @@ type ListNodesResponse struct {
 }
 
 // ListNodes returns the Nodes associated to a Cluster
-func (c *client) ListNodes(ctx context.Context, clusterID string) ([]Node, error) {
+func (c *client) ListNodes(ctx context.Context, clusterID string) (time.Duration, []Node, error) {
 	klog.V(4).Info("ListNodes,ClusterID=", clusterID)
 
 	var currentPage = 1
 	var nodes []Node
+	var cacheControl time.Duration
 	for {
-		paginatedNodes, err := c.listNodesPaginated(ctx, clusterID, currentPage, pageSizeListPools)
+		cc, paginatedNodes, err := c.listNodesPaginated(ctx, clusterID, currentPage, pageSizeListPools)
 		if err != nil {
-			return []Node{}, err
+			return 0, []Node{}, err
 		}
 		nodes = append(nodes, paginatedNodes...)
+		cacheControl = cc
 
 		if len(paginatedNodes) < int(pageSizeListNodes) || len(paginatedNodes) == 0 {
 			break
@@ -428,12 +435,12 @@ func (c *client) ListNodes(ctx context.Context, clusterID string) ([]Node, error
 		currentPage++
 	}
 
-	return nodes, nil
+	return cacheControl, nodes, nil
 }
 
-func (c *client) listNodesPaginated(ctx context.Context, clusterID string, page, pageSize int) ([]Node, error) {
+func (c *client) listNodesPaginated(ctx context.Context, clusterID string, page, pageSize int) (time.Duration, []Node, error) {
 	if len(clusterID) == 0 {
-		return nil, errors.New("clusterID cannot be empty in request")
+		return 0, nil, errors.New("clusterID cannot be empty in request")
 	}
 
 	query := url.Values{}
@@ -447,9 +454,9 @@ func (c *client) listNodesPaginated(ctx context.Context, clusterID string, page,
 	}
 
 	var resp ListNodesResponse
-	err := c.do(ctx, scwReq, &resp)
+	header, err := c.do(ctx, scwReq, &resp)
 
-	return resp.Nodes, err
+	return c.cacheControl(header), resp.Nodes, err
 }
 
 // DeleteNode asynchronously deletes a Node by its id
@@ -466,7 +473,31 @@ func (c *client) DeleteNode(ctx context.Context, nodeID string) (Node, error) {
 	}
 
 	var resp Node
-	err := c.do(ctx, scwReq, &resp)
+	_, err := c.do(ctx, scwReq, &resp)
 
 	return resp, err
+}
+
+// cacheControl extracts the `max-age` from the `Cache-Control` header
+func (c *client) cacheControl(header http.Header) time.Duration {
+	cacheHeader := header.Get("Cache-Control")
+
+	for _, value := range strings.Split(cacheHeader, ",") {
+		value = strings.Trim(value, " ")
+		if strings.HasPrefix(value, "max-age") {
+			duration := strings.Split(value, "max-age=")
+			if len(duration) != 2 {
+				return c.defaultCacheControl
+			}
+
+			durationInt, err := strconv.Atoi(duration[1])
+			if err != nil {
+				return c.defaultCacheControl
+			}
+
+			return time.Second * time.Duration(durationInt)
+		}
+	}
+
+	return c.defaultCacheControl
 }

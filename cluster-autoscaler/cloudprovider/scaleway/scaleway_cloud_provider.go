@@ -37,6 +37,9 @@ import (
 const (
 	// GPULabel is the label added to GPU nodes
 	GPULabel = "k8s.scaleway.com/gpu"
+
+	// DefaultRefreshInterval is the default refresh interval for the cloud provider
+	DefaultRefreshInterval = 60 * time.Second
 )
 
 type scalewayCloudProvider struct {
@@ -86,6 +89,7 @@ func newScalewayCloudProvider(configFile io.Reader, defaultUserAgent string, rl 
 	cfg.SecretKey = getenvOr("SCW_SECRET_KEY", cfg.SecretKey)
 	cfg.Region = getenvOr("SCW_REGION", cfg.Region)
 	cfg.ApiUrl = getenvOr("SCW_API_URL", cfg.ApiUrl)
+	cfg.DefaultCacheControl = DefaultRefreshInterval
 
 	cfg.UserAgent = defaultUserAgent
 
@@ -100,7 +104,7 @@ func newScalewayCloudProvider(configFile io.Reader, defaultUserAgent string, rl 
 		client:          client,
 		clusterID:       cfg.ClusterID,
 		resourceLimiter: rl,
-		refreshInterval: 60 * time.Second,
+		refreshInterval: DefaultRefreshInterval,
 	}
 }
 
@@ -253,13 +257,15 @@ func (scw *scalewayCloudProvider) Refresh() error {
 		return nil
 	}
 
-	pools, err := scw.client.ListPools(context.Background(), scw.clusterID)
+	cc, pools, err := scw.client.ListPools(context.Background(), scw.clusterID)
 	if err != nil {
 		klog.Errorf("Refresh,failed to list pools for cluster %s: %s", scw.clusterID, err)
 		return err
 	}
+	// Update refresh interval based on Cache-Control header from listPools response
+	scw.refreshInterval = cc
 
-	nodes, err := scw.client.ListNodes(context.Background(), scw.clusterID)
+	_, nodes, err := scw.client.ListNodes(context.Background(), scw.clusterID)
 	if err != nil {
 		klog.Errorf("Refresh,failed to list nodes for cluster %s: %s", scw.clusterID, err)
 		return err
