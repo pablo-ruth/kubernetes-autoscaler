@@ -182,7 +182,7 @@ func (scw *scalewayCloudProvider) NodePrice(node *apiv1.Node, startTime time.Tim
 	d := endTime.Sub(startTime)
 	hours := math.Ceil(d.Hours())
 
-	return hours * float64(ng.specs.NodePricePerHour), nil
+	return hours * float64(ng.pool.NodePricePerHour), nil
 }
 
 func (scw *scalewayCloudProvider) PodPrice(pod *apiv1.Pod, startTime time.Time, endTime time.Time) (float64, error) {
@@ -274,18 +274,17 @@ func (scw *scalewayCloudProvider) Refresh() error {
 	// Build NodeGroups
 	nodeGroups := make(map[string]*NodeGroup)
 	for _, pool := range pools {
-		if !pool.Pool.Autoscaling {
+		if !pool.Autoscaling {
 			continue
 		}
 
 		nodeGroup := &NodeGroup{
 			Client: scw.client,
 			nodes:  make(map[string]*scalewaygo.Node),
-			specs:  pool.Specs,
-			pool:   pool.Pool,
+			pool:   pool,
 		}
 
-		nodeGroups[pool.Pool.ID] = nodeGroup
+		nodeGroups[pool.ID] = nodeGroup
 	}
 
 	// Assign nodes to NodeGroups

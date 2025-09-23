@@ -62,7 +62,7 @@ var (
 
 // Client is used to talk to Scaleway Kapsule API
 type Client interface {
-	ListPools(ctx context.Context, clusterID string) (time.Duration, []PoolWithGenericNodeSpecs, error)
+	ListPools(ctx context.Context, clusterID string) (time.Duration, []Pool, error)
 	UpdatePool(ctx context.Context, poolID string, size int) (Pool, error)
 	ListNodes(ctx context.Context, clusterID string) (time.Duration, []Node, error)
 	DeleteNode(ctx context.Context, nodeID string) (Node, error)
@@ -282,10 +282,6 @@ type Pool struct {
 	ID string `json:"id"`
 	// ClusterID: the cluster ID of the pool
 	ClusterID string `json:"cluster_id"`
-	// CreatedAt: the date at which the pool was created
-	CreatedAt *time.Time `json:"created_at"`
-	// UpdatedAt: the date at which the pool was last updated
-	UpdatedAt *time.Time `json:"updated_at"`
 	// Name: the name of the pool
 	Name string `json:"name"`
 	// Status: the status of the pool
@@ -304,41 +300,41 @@ type Pool struct {
 	MaxSize int `json:"max_size"`
 	// Zone: the zone where the nodes will be spawn in
 	Zone string `json:"zone"`
-}
-
-// GenericNodeSpecs represents NodeType specs used for scale-up simulations.
-// it is used to select the appropriate pool to scale-up.
-type GenericNodeSpecs struct {
-	NodePricePerHour float32           `json:"node_price_per_hour"`
-	Capacity         map[string]int64  `json:"capacity"`
-	Allocatable      map[string]int64  `json:"allocatable"`
-	Labels           map[string]string `json:"labels"`
-	Taints           map[string]string `json:"taints"`
-}
-
-// PoolWithGenericNodeSpecs contains the requested `Pool` with additional `Specs` information
-type PoolWithGenericNodeSpecs struct {
-	Pool  Pool             `json:"pool"`
-	Specs GenericNodeSpecs `json:"specs"`
+	// NodePricePerHour: the price per hour of a single node of the pool
+	NodePricePerHour float32 `json:"node_price_per_hour"`
+	// Capacity: capacity of each resource on a single node of the pool
+	Capacity map[string]int64 `json:"capacity"`
+	// Allocatable: allocatable of each resource on a single node of the pool
+	Allocatable map[string]int64 `json:"allocatable"`
+	// Labels: labels applied to each node of the pool
+	Labels map[string]string `json:"labels"`
+	// Taints: taints applied to each node of the pool
+	Taints map[string]string `json:"taints"`
+	// CreatedAt: the date at which the pool was created
+	CreatedAt *time.Time `json:"created_at"`
+	// UpdatedAt: the date at which the pool was last updated
+	UpdatedAt *time.Time `json:"updated_at"`
 }
 
 // ListPoolsResponse is returned from `ListPools` method
 type ListPoolsResponse struct {
 	// Pools: the paginated returned pools
-	Pools []PoolWithGenericNodeSpecs `json:"pools"`
+	Pools []Pool `json:"pools"`
+	// TotalCount: the total count of pools in the cluster
+	TotalCount int `json:"total_count"`
 }
 
 // ListPools returns pools associated to a cluster id
-func (c *client) ListPools(ctx context.Context, clusterID string) (time.Duration, []PoolWithGenericNodeSpecs, error) {
+func (c *client) ListPools(ctx context.Context, clusterID string) (time.Duration, []Pool, error) {
 	klog.V(4).Info("ListPools,ClusterID=", clusterID)
 
 	var currentPage = 1
-	var pools []PoolWithGenericNodeSpecs
+	var pools []Pool
 	var cacheControl time.Duration
 	for {
 		cc, paginatedPools, err := c.listPoolsPaginated(ctx, clusterID, currentPage, pageSizeListPools)
 		if err != nil {
-			return 0, []PoolWithGenericNodeSpecs{}, err
+			return 0, []Pool{}, err
 		}
 		pools = append(pools, paginatedPools...)
 		cacheControl = cc
@@ -353,7 +349,7 @@ func (c *client) ListPools(ctx context.Context, clusterID string) (time.Duration
 	return cacheControl, pools, nil
 }
 
-func (c *client) listPoolsPaginated(ctx context.Context, clusterID string, page, pageSize int) (time.Duration, []PoolWithGenericNodeSpecs, error) {
+func (c *client) listPoolsPaginated(ctx context.Context, clusterID string, page, pageSize int) (time.Duration, []Pool, error) {
 	if len(clusterID) == 0 {
 		return 0, nil, errors.New("clusterID cannot be empty in request")
 	}
@@ -364,7 +360,7 @@ func (c *client) listPoolsPaginated(ctx context.Context, clusterID string, page,
 
 	scwReq := &scalewayRequest{
 		Method: "GET",
-		Path:   fmt.Sprintf("/k8s/v1/regions/%s/clusters/%s/pools-autoscaler", c.region, clusterID),
+		Path:   fmt.Sprintf("/k8s/v1/regions/%s/autoscaler/clusters/%s/pools", c.region, clusterID),
 		Query:  query,
 	}
 
@@ -392,7 +388,7 @@ func (c *client) UpdatePool(ctx context.Context, poolID string, size int) (Pool,
 
 	scwReq := &scalewayRequest{
 		Method: "PATCH",
-		Path:   fmt.Sprintf("/k8s/v1/regions/%s/pools/%s", c.region, poolID),
+		Path:   fmt.Sprintf("/k8s/v1/regions/%s/autoscaler/pools/%s", c.region, poolID),
 	}
 
 	buf, err := json.Marshal(UpdatePoolRequest{PoolID: poolID, Size: size})
@@ -411,6 +407,8 @@ func (c *client) UpdatePool(ctx context.Context, poolID string, size int) (Pool,
 type ListNodesResponse struct {
 	// Nodes: the paginated returned nodes
 	Nodes []Node `json:"nodes"`
+	// TotalCount: the total count of nodes in the cluster
+	TotalCount int `json:"total_count"`
 }
 
 // ListNodes returns the Nodes associated to a Cluster
@@ -449,7 +447,7 @@ func (c *client) listNodesPaginated(ctx context.Context, clusterID string, page,
 
 	scwReq := &scalewayRequest{
 		Method: "GET",
-		Path:   fmt.Sprintf("/k8s/v1/regions/%s/clusters/%s/nodes", c.region, clusterID),
+		Path:   fmt.Sprintf("/k8s/v1/regions/%s/autoscaler/clusters/%s/nodes", c.region, clusterID),
 		Query:  query,
 	}
 
@@ -469,7 +467,7 @@ func (c *client) DeleteNode(ctx context.Context, nodeID string) (Node, error) {
 
 	scwReq := &scalewayRequest{
 		Method: "DELETE",
-		Path:   fmt.Sprintf("/k8s/v1/regions/%s/nodes/%s", c.region, nodeID),
+		Path:   fmt.Sprintf("/k8s/v1/regions/%s/autoscaler/nodes/%s", c.region, nodeID),
 	}
 
 	var resp Node

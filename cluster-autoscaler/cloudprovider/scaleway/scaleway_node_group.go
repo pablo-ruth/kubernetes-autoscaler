@@ -37,7 +37,6 @@ type NodeGroup struct {
 	scalewaygo.Client
 
 	nodes map[string]*scalewaygo.Node
-	specs scalewaygo.GenericNodeSpecs
 	pool  scalewaygo.Pool
 }
 
@@ -186,8 +185,8 @@ func (ng *NodeGroup) TemplateNodeInfo() (*framework.NodeInfo, error) {
 	klog.V(4).Infof("TemplateNodeInfo,PoolID=%s", ng.pool.ID)
 	node := apiv1.Node{
 		ObjectMeta: metav1.ObjectMeta{
-			Name:   ng.specs.Labels[apiv1.LabelHostname],
-			Labels: ng.specs.Labels,
+			Name:   ng.pool.Labels[apiv1.LabelHostname],
+			Labels: ng.pool.Labels,
 		},
 		Status: apiv1.NodeStatus{
 			Capacity:    apiv1.ResourceList{},
@@ -195,16 +194,16 @@ func (ng *NodeGroup) TemplateNodeInfo() (*framework.NodeInfo, error) {
 		},
 	}
 
-	for capacityName, capacityValue := range ng.specs.Capacity {
+	for capacityName, capacityValue := range ng.pool.Capacity {
 		node.Status.Capacity[apiv1.ResourceName(capacityName)] = *resource.NewQuantity(capacityValue, resource.DecimalSI)
 	}
 
-	for allocatableName, allocatableValue := range ng.specs.Allocatable {
+	for allocatableName, allocatableValue := range ng.pool.Allocatable {
 		node.Status.Allocatable[apiv1.ResourceName(allocatableName)] = *resource.NewQuantity(allocatableValue, resource.DecimalSI)
 	}
 
 	node.Status.Conditions = cloudprovider.BuildReadyConditions()
-	node.Spec.Taints = parseTaints(ng.specs.Taints)
+	node.Spec.Taints = parseTaints(ng.pool.Taints)
 
 	nodeInfo := framework.NewNodeInfo(&node, nil, &framework.PodInfo{Pod: cloudprovider.BuildKubeProxy(ng.pool.Name)})
 	return nodeInfo, nil
