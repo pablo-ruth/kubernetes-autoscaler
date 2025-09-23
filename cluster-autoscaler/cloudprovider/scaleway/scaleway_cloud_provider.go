@@ -291,6 +291,7 @@ func (scw *scalewayCloudProvider) Refresh() error {
 	for _, node := range nodes {
 		_, ok := nodeGroups[node.PoolID]
 		if !ok {
+			klog.V(4).Infof("Refresh,ClusterID=%s,node %s found for PoolID=%s which does not exist in nodeGroups (possible data consistency issue)", scw.clusterID, node.ProviderID, node.PoolID)
 			continue
 		}
 
