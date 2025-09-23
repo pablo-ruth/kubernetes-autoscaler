@@ -426,7 +426,7 @@ func (c *client) ListNodes(ctx context.Context, clusterID string) (time.Duration
 		nodes = append(nodes, paginatedNodes...)
 		cacheControl = cc
 
-		if len(paginatedNodes) < int(pageSizeListNodes) || len(paginatedNodes) == 0 {
+		if len(paginatedNodes) < pageSizeListNodes || len(paginatedNodes) == 0 {
 			break
 		}
 
