@@ -19,9 +19,7 @@ package scaleway
 import (
 	"context"
 	"encoding/json"
-	"fmt"
 	"io"
-	"io/ioutil"
 	"math"
 	"os"
 	"time"
@@ -39,6 +37,9 @@ import (
 const (
 	// GPULabel is the label added to GPU nodes
 	GPULabel = "k8s.scaleway.com/gpu"
+
+	// DefaultRefreshInterval is the default refresh interval for the cloud provider
+	DefaultRefreshInterval = 60 * time.Second
 )
 
 type scalewayCloudProvider struct {
@@ -47,13 +48,17 @@ type scalewayCloudProvider struct {
 	// ClusterID is the cluster id where the Autoscaler is running.
 	clusterID string
 	// nodeGroups is an abstraction around the Pool object returned by the API
-	nodeGroups []*NodeGroup
+	nodeGroups map[string]*NodeGroup
+	// lastRefresh is the last time the nodes and node groups were refreshed from the API
+	lastRefresh time.Time
+	// refreshInterval is the minimum duration between refreshes
+	refreshInterval time.Duration
 
 	resourceLimiter *cloudprovider.ResourceLimiter
 }
 
 func readConf(config *scalewaygo.Config, configFile io.Reader) error {
-	body, err := ioutil.ReadAll(configFile)
+	body, err := io.ReadAll(configFile)
 	if err != nil {
 		return err
 	}
@@ -84,6 +89,7 @@ func newScalewayCloudProvider(configFile io.Reader, defaultUserAgent string, rl 
 	cfg.SecretKey = getenvOr("SCW_SECRET_KEY", cfg.SecretKey)
 	cfg.Region = getenvOr("SCW_REGION", cfg.Region)
 	cfg.ApiUrl = getenvOr("SCW_API_URL", cfg.ApiUrl)
+	cfg.DefaultCacheControl = DefaultRefreshInterval
 
 	cfg.UserAgent = defaultUserAgent
 
@@ -92,21 +98,18 @@ func newScalewayCloudProvider(configFile io.Reader, defaultUserAgent string, rl 
 		klog.Fatalf("failed to create scaleway cloud provider: %v", err)
 	}
 
-	klog.V(4).Infof("Scaleway Cloud Provider built; ClusterId=%s,SecretKey=%s-***,Region=%s,ApiURL=%s", cfg.ClusterID, client.Token()[:8], client.Region(), client.ApiURL())
+	klog.V(4).Infof("Scaleway Cloud Provider built; ClusterId=%s,Region=%s,ApiURL=%s", cfg.ClusterID, client.Region(), client.ApiURL())
 
 	return &scalewayCloudProvider{
 		client:          client,
 		clusterID:       cfg.ClusterID,
 		resourceLimiter: rl,
+		refreshInterval: DefaultRefreshInterval,
 	}
 }
 
 // BuildScaleway returns CloudProvider implementation for Scaleway.
-func BuildScaleway(
-	opts config.AutoscalingOptions,
-	do cloudprovider.NodeGroupDiscoveryOptions,
-	rl *cloudprovider.ResourceLimiter,
-) cloudprovider.CloudProvider {
+func BuildScaleway(opts config.AutoscalingOptions, do cloudprovider.NodeGroupDiscoveryOptions, rl *cloudprovider.ResourceLimiter) cloudprovider.CloudProvider {
 	var configFile io.Reader
 
 	if opts.CloudConfig != "" {
@@ -123,6 +126,7 @@ func BuildScaleway(
 			}()
 		}
 	}
+
 	return newScalewayCloudProvider(configFile, opts.UserAgent, rl)
 }
 
@@ -134,23 +138,14 @@ func (*scalewayCloudProvider) Name() string {
 // NodeGroups returns all node groups configured for this cluster.
 // critical endpoint, make it fast
 func (scw *scalewayCloudProvider) NodeGroups() []cloudprovider.NodeGroup {
-
 	klog.V(4).Info("NodeGroups,ClusterID=", scw.clusterID)
 
-	nodeGroups := make([]cloudprovider.NodeGroup, len(scw.nodeGroups))
-	for i, ng := range scw.nodeGroups {
-		nodeGroups[i] = ng
-	}
-	return nodeGroups
-}
-
-func (scw *scalewayCloudProvider) nodeGroupForNode(node *apiv1.Node) (*NodeGroup, error) {
+	nodeGroups := make([]cloudprovider.NodeGroup, 0, len(scw.nodeGroups))
 	for _, ng := range scw.nodeGroups {
-		if _, ok := ng.nodes[node.Spec.ProviderID]; ok {
-			return ng, nil
-		}
+		nodeGroups = append(nodeGroups, ng)
 	}
-	return nil, nil
+
+	return nodeGroups
 }
 
 // NodeGroupForNode returns the node group for the given node, nil if the node
@@ -161,6 +156,16 @@ func (scw *scalewayCloudProvider) NodeGroupForNode(node *apiv1.Node) (cloudprovi
 	klog.V(4).Infof("NodeGroupForNode,NodeSpecProviderID=%s", node.Spec.ProviderID)
 
 	return scw.nodeGroupForNode(node)
+}
+
+func (scw *scalewayCloudProvider) nodeGroupForNode(node *apiv1.Node) (*NodeGroup, error) {
+	for _, ng := range scw.nodeGroups {
+		if _, ok := ng.nodes[node.Spec.ProviderID]; ok {
+			return ng, nil
+		}
+	}
+
+	return nil, nil
 }
 
 // HasInstance returns whether a given node has a corresponding instance in this cloud provider
@@ -177,7 +182,7 @@ func (scw *scalewayCloudProvider) NodePrice(node *apiv1.Node, startTime time.Tim
 	d := endTime.Sub(startTime)
 	hours := math.Ceil(d.Hours())
 
-	return hours * float64(ng.specs.NodePricePerHour), nil
+	return hours * float64(ng.pool.NodePricePerHour), nil
 }
 
 func (scw *scalewayCloudProvider) PodPrice(pod *apiv1.Pod, startTime time.Time, endTime time.Time) (float64, error) {
@@ -196,6 +201,8 @@ func (scw *scalewayCloudProvider) GetAvailableMachineTypes() ([]string, error) {
 	return []string{}, nil
 }
 
+// NewNodeGroup creates a new node group based on the provided definition.
+// Not implemented
 func (scw *scalewayCloudProvider) NewNodeGroup(
 	machineType string,
 	labels map[string]string,
@@ -244,36 +251,57 @@ func (scw *scalewayCloudProvider) Cleanup() error {
 func (scw *scalewayCloudProvider) Refresh() error {
 	klog.V(4).Info("Refresh,ClusterID=", scw.clusterID)
 
-	ctx := context.Background()
-	resp, err := scw.client.ListPools(ctx, &scalewaygo.ListPoolsRequest{ClusterID: scw.clusterID})
+	// Only skip refresh if lastRefresh is non-zero and interval has not elapsed
+	if !scw.lastRefresh.IsZero() && time.Since(scw.lastRefresh) < scw.refreshInterval {
+		klog.V(4).Infof("Refresh,ClusterID=%s,skipping refresh, last refresh was %s ago", scw.clusterID, time.Since(scw.lastRefresh))
+		return nil
+	}
 
+	cc, pools, err := scw.client.ListPools(context.Background(), scw.clusterID)
 	if err != nil {
 		klog.Errorf("Refresh,failed to list pools for cluster %s: %s", scw.clusterID, err)
 		return err
 	}
+	// Update refresh interval based on Cache-Control header from listPools response
+	scw.refreshInterval = cc
 
-	var ng []*NodeGroup
+	_, nodes, err := scw.client.ListNodes(context.Background(), scw.clusterID)
+	if err != nil {
+		klog.Errorf("Refresh,failed to list nodes for cluster %s: %s", scw.clusterID, err)
+		return err
+	}
 
-	for _, p := range resp.Pools {
-
-		if p.Pool.Autoscaling == false {
+	// Build NodeGroups
+	nodeGroups := make(map[string]*NodeGroup)
+	for _, pool := range pools {
+		if !pool.Autoscaling {
 			continue
 		}
 
-		nodes, err := nodesFromPool(scw.client, p.Pool)
-		if err != nil {
-			return fmt.Errorf("Refresh,failed to list nodes for pool %s: %w", p.Pool.ID, err)
-		}
-		ng = append(ng, &NodeGroup{
+		nodeGroup := &NodeGroup{
 			Client: scw.client,
-			nodes:  nodes,
-			specs:  &p.Specs,
-			p:      p.Pool,
-		})
-	}
-	klog.V(4).Infof("Refresh,ClusterID=%s,%d pools found", scw.clusterID, len(ng))
+			nodes:  make(map[string]*scalewaygo.Node),
+			pool:   pool,
+		}
 
-	scw.nodeGroups = ng
+		nodeGroups[pool.ID] = nodeGroup
+	}
+
+	// Assign nodes to NodeGroups
+	for _, node := range nodes {
+		_, ok := nodeGroups[node.PoolID]
+		if !ok {
+			klog.V(4).Infof("Refresh,ClusterID=%s,node %s found for PoolID=%s which does not exist in nodeGroups (possible data consistency issue)", scw.clusterID, node.ProviderID, node.PoolID)
+			continue
+		}
+
+		nodeGroups[node.PoolID].nodes[node.ProviderID] = &node
+	}
+
+	klog.V(4).Infof("Refresh,ClusterID=%s,%d pools found", scw.clusterID, len(nodeGroups))
+	scw.nodeGroups = nodeGroups
+
+	scw.lastRefresh = time.Now()
 
 	return nil
 }
