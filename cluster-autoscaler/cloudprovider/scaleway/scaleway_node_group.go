@@ -77,12 +77,13 @@ func (ng *NodeGroup) IncreaseSize(delta int) error {
 		return fmt.Errorf("size increase is too large. current: %d desired: %d max: %d", ng.pool.Size, targetSize, ng.MaxSize())
 	}
 
-	_, err := ng.UpdatePool(context.Background(), ng.pool.ID, targetSize)
+	updatedPool, err := ng.UpdatePool(context.Background(), ng.pool.ID, targetSize)
 	if err != nil {
 		return err
 	}
 
-	ng.pool.Size = targetSize
+	ng.pool.Size = updatedPool.Size
+	ng.pool.Status = updatedPool.Status
 	return nil
 }
 
@@ -139,12 +140,12 @@ func (ng *NodeGroup) DecreaseTargetSize(delta int) error {
 	}
 
 	ctx := context.Background()
-	_, err := ng.UpdatePool(ctx, ng.pool.ID, targetSize)
+	updatedNode, err := ng.UpdatePool(ctx, ng.pool.ID, targetSize)
 	if err != nil {
 		return err
 	}
 
-	ng.pool.Size = targetSize
+	ng.pool.Size = updatedNode.Size
 
 	return nil
 }
